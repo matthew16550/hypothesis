@@ -38,6 +38,7 @@ from hypothesis.internal.compat import (
 from hypothesis.internal.conjecture.data import (
     MAX_DEPTH,
     ConjectureData,
+    OverrunPlaceholder,
     Status,
     StopTest,
 )
@@ -1000,61 +1001,6 @@ class ConjectureRunner(object):
     def new_shrinker(self, example, predicate):
         return Shrinker(self, example, predicate)
 
-    def prescreen_buffer(self, buffer):
-        """Attempt to rule out buffer as a possible interesting candidate.
-
-        Returns False if we know for sure that running this buffer will not
-        produce an interesting result. Returns True if it might (because it
-        explores territory we have not previously tried).
-
-        This is purely an optimisation to try to reduce the number of tests we
-        run. "return True" would be a valid but inefficient implementation.
-        """
-
-        # Traverse the tree, to see if we have already tried this buffer
-        # (or a prefix of it).
-        node_index = 0
-        n = len(buffer)
-        for k, b in enumerate(buffer):
-            if node_index in self.dead:
-                # This buffer (or a prefix of it) has already been tested,
-                # or has already had its descendants fully explored.
-                # Testing it again would not be helpful.
-                return False
-            try:
-                # The block size at that point provides a lower bound on how
-                # many more bytes are required. If the buffer does not have
-                # enough bytes to fulfill that block size then we can rule out
-                # this buffer.
-                if k + self.block_sizes[node_index] > n:
-                    return False
-            except KeyError:
-                pass
-
-            # If there's a forced value or a mask at this position, then
-            # pretend that the buffer already contains a matching value,
-            # because the test function is going to do the same.
-            try:
-                b = self.forced[node_index]
-            except KeyError:
-                pass
-            try:
-                b = b & self.masks[node_index]
-            except KeyError:
-                pass
-
-            try:
-                node_index = self.tree[node_index][b]
-            except KeyError:
-                # The buffer wasn't in the tree, which means we haven't tried
-                # it. That makes it a possible candidate.
-                return True
-        else:
-            # We ran out of buffer before reaching a leaf or a missing node.
-            # That means the test function is going to draw beyond the end
-            # of this buffer, which makes it a bad candidate.
-            return False
-
     def cached_test_function(self, buffer):
         """Checks the tree to see if we've tested this buffer, and returns the
         previous result if we have.
@@ -1062,8 +1008,11 @@ class ConjectureRunner(object):
         Otherwise we call through to ``test_function``, and return a
         fresh result.
         """
+        rewritten = bytearray()
+        overrun = False
+
         node_index = 0
-        for c in buffer:
+        for i, c in enumerate(buffer):
             # If there's a forced value or a mask at this position, then
             # pretend that the buffer already contains a matching value,
             # because the test function is going to do the same.
@@ -1075,6 +1024,18 @@ class ConjectureRunner(object):
                 c = c & self.masks[node_index]
             except KeyError:
                 pass
+
+            try:
+                # If we know how many bytes are read at this point and
+                # there aren't enough, then it doesn't actually matter
+                # what the values are, we're definitely going to overrun.
+                if i + self.block_sizes[node_index] > len(buffer):
+                    overrun = True
+                    break
+            except KeyError:
+                pass
+
+            rewritten.append(c)
 
             try:
                 node_index = self.tree[node_index][c]
@@ -1090,10 +1051,12 @@ class ConjectureRunner(object):
                 return node
         else:
             # Falling off the end of this loop means that we're about to test
-            # a prefix of a previously-tested byte stream. The test is going
-            # to draw beyond the end of the buffer, and fail due to overrun.
-            # Currently there is no special handling for this case.
-            pass
+            # a prefix of a previously-tested byte stream, so the test would
+            # overrun.
+            overrun = True
+
+        if overrun:
+            return OverrunPlaceholder(buffer=hbytes(rewritten))
 
         # We didn't find a match in the tree, so we need to run the test
         # function normally.

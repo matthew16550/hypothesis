@@ -138,6 +138,20 @@ class Block(object):
         return self.forced or self.all_zero
 
 
+@attr.s(frozen=True)
+class OverrunPlaceholder(object):
+    """A dummy object that looks just enough like a ConjectureData
+    instance to be used as placeholder return values for circumstances
+    where we can tell that a test function call would overrun without
+    bothering to actually run it."""
+
+    status = Status.OVERRUN
+    blocks = ()
+    examples = ()
+
+    buffer = attr.ib()
+
+
 global_test_counter = 0
 
 

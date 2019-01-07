@@ -51,17 +51,17 @@ from tests.common.utils import checks_deprecated_behaviour, no_shrink
 SOME_LABEL = calc_label_from_name("some label")
 
 
+TEST_SETTINGS = settings(
+    max_examples=5000,
+    buffer_size=1024,
+    database=None,
+    suppress_health_check=HealthCheck.all(),
+)
+
+
 def run_to_buffer(f):
     with deterministic_PRNG():
-        runner = ConjectureRunner(
-            f,
-            settings=settings(
-                max_examples=5000,
-                buffer_size=1024,
-                database=None,
-                suppress_health_check=HealthCheck.all(),
-            ),
-        )
+        runner = ConjectureRunner(f, settings=TEST_SETTINGS)
         runner.run()
         assert runner.interesting_examples
         last_data, = runner.interesting_examples.values()
@@ -722,7 +722,11 @@ def test_can_delete_intervals(monkeypatch):
 
 
 def test_detects_too_small_block_starts():
+    call_count = [0]
+
     def f(data):
+        assert call_count[0] == 0
+        call_count[0] += 1
         data.draw_bytes(8)
         data.mark_interesting()
 
@@ -730,7 +734,10 @@ def test_detects_too_small_block_starts():
     r = ConjectureData.for_buffer(hbytes(8))
     runner.test_function(r)
     assert r.status == Status.INTERESTING
-    assert not runner.prescreen_buffer(hbytes([255] * 7))
+    assert call_count[0] == 1
+    r2 = runner.cached_test_function(hbytes([255] * 7))
+    assert r2.status == Status.OVERRUN
+    assert call_count[0] == 1
 
 
 def test_shrinks_both_interesting_examples(monkeypatch):
@@ -1909,3 +1916,25 @@ def test_target_selector_will_eventually_reuse_examples():
     for _ in range(2):
         x = selector.select()
         assert x.global_identifier in seen
+
+
+def test_cached_test_function_does_not_reinvoke_on_prefix():
+    call_count = [0]
+
+    def test_function(data):
+        call_count[0] += 1
+        data.draw_bits(8)
+        data.write(hbytes([7]))
+        data.draw_bits(8)
+
+    with deterministic_PRNG():
+        runner = ConjectureRunner(test_function, settings=TEST_SETTINGS)
+
+        data = runner.cached_test_function(hbytes(3))
+        assert data.status == Status.VALID
+        for n in [2, 1, 0]:
+            prefix_data = runner.cached_test_function(hbytes(n))
+            assert prefix_data.status == Status.OVERRUN
+            assert len(prefix_data.buffer) == n
+            assert prefix_data.buffer == data.buffer[: len(prefix_data.buffer)]
+        assert call_count[0] == 1
